@@ -45,6 +45,15 @@ const ROOM_TYPES: string[] = Array.from(
   new Set(ALL_ROOMS.map((r) => r.type))
 ).sort();
 
+// Maps used to interlock the two filter dropdowns: each value only offers
+// options that exist alongside the other selection in rooms.json.
+const TYPES_BY_DEPT: Record<string, Set<string>> = {};
+const DEPTS_BY_TYPE: Record<string, Set<string>> = {};
+for (const r of ALL_ROOMS) {
+  (TYPES_BY_DEPT[r.department] ??= new Set()).add(r.type);
+  (DEPTS_BY_TYPE[r.type] ??= new Set()).add(r.department);
+}
+
 // Cap the rendered list so we don't try to render or check 788 rooms at once.
 const MAX_RESULTS = 50;
 
@@ -264,6 +273,24 @@ export default function Home() {
   // null = never queried; false = at least one query came back unauthenticated.
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
 
+  // Filter options narrow based on the opposite selection.
+  const availableDepartments = roomType
+    ? DEPARTMENTS.filter((d) => DEPTS_BY_TYPE[roomType]?.has(d))
+    : DEPARTMENTS;
+  const availableRoomTypes = department
+    ? ROOM_TYPES.filter((t) => TYPES_BY_DEPT[department]?.has(t))
+    : ROOM_TYPES;
+
+  // When one filter changes, clear the other if the existing pick is no longer valid.
+  const handleDepartmentChange = (val: string) => {
+    setDepartment(val);
+    if (val && roomType && !TYPES_BY_DEPT[val]?.has(roomType)) setRoomType("");
+  };
+  const handleRoomTypeChange = (val: string) => {
+    setRoomType(val);
+    if (val && department && !DEPTS_BY_TYPE[val]?.has(department)) setDepartment("");
+  };
+
   // Dynamically compute valid end-time options (must be strictly after start)
   const validEndTimes = startTime
     ? ALL_TIMES.filter((t) => {
@@ -436,9 +463,9 @@ export default function Home() {
               <Select
                 id="department"
                 placeholder="Select Department"
-                options={DEPARTMENTS}
+                options={availableDepartments}
                 value={department}
-                onChange={setDepartment}
+                onChange={handleDepartmentChange}
               />
             </div>
 
@@ -449,9 +476,9 @@ export default function Home() {
               <Select
                 id="room-type"
                 placeholder="Select Room"
-                options={ROOM_TYPES}
+                options={availableRoomTypes}
                 value={roomType}
-                onChange={setRoomType}
+                onChange={handleRoomTypeChange}
               />
             </div>
           </div>
