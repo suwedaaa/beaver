@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import DateRangePicker, { DateRange } from "./components/DateRangePicker";
+import rawRooms from "../data/rooms.json";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -10,8 +11,15 @@ interface Room {
   name: string;
   department: string;
   type: string;
-  hasCamera?: boolean;
-  hasEllipsis?: boolean;
+  celcatUrl: string;
+}
+
+interface RawRoom {
+  roomId: string;
+  roomName: string;
+  type: string;
+  department: string;
+  celcatUrl: string;
 }
 
 // ─── Static Data ─────────────────────────────────────────────────────────────
@@ -21,29 +29,55 @@ const ALL_TIMES = [
   "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00",
 ];
 
-const DEPARTMENTS = [
-  "Computing",
-  "Life Sciences",
-  "Physics",
-  "Mathematics",
-  "Chemistry",
-  "Electrical Engineering",
-  "Mechanical Engineering",
-];
+const ALL_ROOMS: Room[] = (rawRooms as RawRoom[]).map((r) => ({
+  id: r.roomId,
+  name: r.roomName,
+  department: r.department,
+  type: r.type,
+  celcatUrl: r.celcatUrl,
+}));
 
-const ROOM_TYPES = [
-  "Lecture Theatre",
-  "Seminar Room",
-  "Lab",
-  "Meeting Room",
-  "Study Space",
-];
+const DEPARTMENTS: string[] = Array.from(
+  new Set(ALL_ROOMS.map((r) => r.department))
+).sort();
 
-const SAMPLE_ROOMS: Room[] = [
-  { id: "hxly138", name: "HXLY 138", department: "Computing", type: "Lecture Theatre", hasCamera: true },
-  { id: "safbg61", name: "SAFB G61", department: "Life Sciences", type: "Seminar Room", hasEllipsis: true },
-  { id: "blkt122", name: "BLKT 122 – Lecture Theatre 3", department: "Physics", type: "Lecture Theatre" },
-];
+const ROOM_TYPES: string[] = Array.from(
+  new Set(ALL_ROOMS.map((r) => r.type))
+).sort();
+
+// Cap the rendered list so we don't try to render or check 788 rooms at once.
+const MAX_RESULTS = 50;
+
+// ─── Availability check ─────────────────────────────────────────────────────
+
+type Availability = "available" | "busy" | "unknown";
+
+function formatDate(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+async function fetchAvailability(
+  roomId: string,
+  date: string,
+  start: string,
+  end: string
+): Promise<Availability> {
+  try {
+    const res = await fetch("/api/availability", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomId, date, start, end }),
+    });
+    if (!res.ok) return "unknown";
+    const data: { isAvailable: boolean } = await res.json();
+    return data.isAvailable ? "available" : "busy";
+  } catch {
+    return "unknown";
+  }
+}
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -115,29 +149,6 @@ function BeaverIcon() {
   );
 }
 
-// ─── Camera Icon ─────────────────────────────────────────────────────────────
-
-function CameraIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ display: "inline", verticalAlign: "middle", marginLeft: "6px", color: "#6b5c4e" }}
-      aria-label="Has camera"
-    >
-      <path d="M23 7l-7 5 7 5V7z" />
-      <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-    </svg>
-  );
-}
-
 // ─── Select Component ─────────────────────────────────────────────────────────
 
 interface SelectProps {
@@ -178,20 +189,38 @@ function Select({ id, placeholder, options, value, onChange, hasError }: SelectP
 
 // ─── Room Card ────────────────────────────────────────────────────────────────
 
-function RoomCard({ room }: { room: Room }) {
+function AvailabilityBadge({ status }: { status: Availability }) {
+  if (status === "available") return <span className="badge badge-available">Available</span>;
+  if (status === "busy") return <span className="badge badge-busy">Busy</span>;
+  return <span className="badge badge-unknown">—</span>;
+}
+
+function RoomCard({
+  room,
+  availability,
+}: {
+  room: Room;
+  availability: Availability | null;
+}) {
   return (
     <div className="room-card" role="listitem">
       <div className="room-name-col">
-        <span className="room-name">
+        <a
+          href={room.celcatUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="room-name"
+        >
           {room.name}
-        </span>
-        {room.hasCamera && <CameraIcon />}
-        {room.hasEllipsis && (
-          <span className="room-ellipsis" aria-label="More options">…</span>
-        )}
+        </a>
       </div>
       <div className="room-dept">{room.department}</div>
       <div className="room-type">{room.type}</div>
+      {availability !== null && (
+        <div className="room-availability">
+          <AvailabilityBadge status={availability} />
+        </div>
+      )}
     </div>
   );
 }
@@ -222,6 +251,8 @@ export default function Home() {
   const [appliedFilters, setAppliedFilters] = useState({
     dateRange: emptyRange, startTime: "", endTime: "", department: "", roomType: ""
   });
+  const [availability, setAvailability] = useState<Record<string, Availability>>({});
+  const [isChecking, setIsChecking] = useState(false);
 
   // Dynamically compute valid end-time options (must be strictly after start)
   const validEndTimes = startTime
@@ -243,12 +274,37 @@ export default function Home() {
     setErrors((prev) => ({ ...prev, timeWindow: undefined }));
   };
 
-  const handleApply = () => {
+  const handleApply = async () => {
     const errs = validate(dateRange, startTime, endTime);
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
+
     setAppliedFilters({ dateRange, startTime, endTime, department, roomType });
     setHasSearched(true);
+    setAvailability({});
+
+    // Only check live availability when the user provided both a date and a
+    // time window — otherwise we just show the filtered room list.
+    if (!dateRange.from || !startTime || !endTime) return;
+
+    const matches = ALL_ROOMS.filter((room) => {
+      if (department && room.department !== department) return false;
+      if (roomType && room.type !== roomType) return false;
+      return true;
+    }).slice(0, MAX_RESULTS);
+
+    if (matches.length === 0) return;
+
+    setIsChecking(true);
+    const date = formatDate(dateRange.from);
+    const entries = await Promise.all(
+      matches.map(async (room) => {
+        const status = await fetchAvailability(room.id, date, startTime, endTime);
+        return [room.id, status] as const;
+      })
+    );
+    setAvailability(Object.fromEntries(entries));
+    setIsChecking(false);
   };
 
   const handleReset = () => {
@@ -260,16 +316,21 @@ export default function Home() {
     setErrors({});
     setHasSearched(false);
     setAppliedFilters({ dateRange: emptyRange, startTime: "", endTime: "", department: "", roomType: "" });
+    setAvailability({});
+    setIsChecking(false);
   };
 
   // Rooms only shown after a valid search
-  const filteredRooms = hasSearched
-    ? SAMPLE_ROOMS.filter((room) => {
+  const allMatches = hasSearched
+    ? ALL_ROOMS.filter((room) => {
         if (appliedFilters.department && room.department !== appliedFilters.department) return false;
         if (appliedFilters.roomType && room.type !== appliedFilters.roomType) return false;
         return true;
       })
     : null;
+
+  const filteredRooms = allMatches ? allMatches.slice(0, MAX_RESULTS) : null;
+  const truncated = allMatches ? allMatches.length - (filteredRooms?.length ?? 0) : 0;
 
   return (
     <>
@@ -283,7 +344,7 @@ export default function Home() {
           <div className="navbar-links">
             <a href="#search" className="nav-link">Search Rooms</a>
             <a
-              href="https://github.com"
+              href="https://github.com/suwedaaa/beaver"
               target="_blank"
               rel="noopener noreferrer"
               className="nav-link"
@@ -401,9 +462,25 @@ export default function Home() {
             ) : filteredRooms.length === 0 ? (
               <p className="no-rooms">No rooms match your filters. Try adjusting your search.</p>
             ) : (
-              filteredRooms.map((room) => (
-                <RoomCard key={room.id} room={room} />
-              ))
+              <>
+                {isChecking && (
+                  <p className="checking-status" role="status">
+                    Checking live availability against CELCAT…
+                  </p>
+                )}
+                {filteredRooms.map((room) => (
+                  <RoomCard
+                    key={room.id}
+                    room={room}
+                    availability={availability[room.id] ?? null}
+                  />
+                ))}
+                {truncated > 0 && (
+                  <p className="result-truncation-note">
+                    Showing first {filteredRooms.length} of {filteredRooms.length + truncated} matching rooms. Narrow your filters to see more.
+                  </p>
+                )}
+              </>
             )}
           </div>
         </section>
@@ -430,11 +507,6 @@ export default function Home() {
               <li>
                 <a href="mailto:enquiries@stemmm.co.uk" className="contact-link">
                   enquiries@stemmm.co.uk
-                </a>
-              </li>
-              <li>
-                <a href="mailto:enquiries@anothersociety.co.uk" className="contact-link">
-                  enquiries@anothersociety.co.uk
                 </a>
               </li>
             </ul>
@@ -663,11 +735,45 @@ export default function Home() {
           border-radius: 12px;
           padding: 1.1rem 1.5rem;
           display: grid;
-          grid-template-columns: 2fr 1.5fr 1.5fr;
+          grid-template-columns: 2fr 1.5fr 1.5fr auto;
           align-items: center;
           gap: 1rem;
           transition: box-shadow 0.2s, transform 0.15s;
-          cursor: pointer;
+        }
+        .room-availability {
+          justify-self: end;
+        }
+        .badge {
+          display: inline-block;
+          padding: 0.25rem 0.6rem;
+          border-radius: 999px;
+          font-size: 0.78rem;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+        }
+        .badge-available {
+          background: #d8ead0;
+          color: #2f5d2a;
+        }
+        .badge-busy {
+          background: #f3d4cc;
+          color: #8a2f1f;
+        }
+        .badge-unknown {
+          background: #e6dfd6;
+          color: #6b5c4e;
+        }
+        .checking-status {
+          font-size: 0.85rem;
+          color: #6b5c4e;
+          font-style: italic;
+          padding: 0.5rem 0;
+        }
+        .result-truncation-note {
+          text-align: center;
+          color: #6b5c4e;
+          font-size: 0.85rem;
+          padding: 0.75rem 0;
         }
         .room-card:hover {
           box-shadow: 0 4px 14px rgba(60,40,20,0.1);
@@ -684,12 +790,6 @@ export default function Home() {
           color: #2c1f14;
           text-decoration: underline;
           text-underline-offset: 3px;
-        }
-        .room-ellipsis {
-          font-size: 1rem;
-          color: #6b5c4e;
-          margin-left: 6px;
-          letter-spacing: 2px;
         }
         .room-dept {
           font-size: 0.88rem;
