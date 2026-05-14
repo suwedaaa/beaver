@@ -59,23 +59,31 @@ function formatDate(d: Date): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+interface AvailabilityResponse {
+  isAvailable: boolean;
+  authenticated: boolean;
+}
+
 async function fetchAvailability(
   roomId: string,
-  date: string,
+  startDate: string,
+  endDate: string,
   start: string,
   end: string
-): Promise<Availability> {
+): Promise<{ status: Availability; authenticated: boolean | null }> {
   try {
     const res = await fetch("/api/availability", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ roomId, date, start, end }),
+      body: JSON.stringify({ roomId, startDate, endDate, start, end }),
     });
-    if (!res.ok) return "unknown";
-    const data: { isAvailable: boolean } = await res.json();
-    return data.isAvailable ? "available" : "busy";
+    if (!res.ok) return { status: "unknown", authenticated: null };
+    const data: AvailabilityResponse = await res.json();
+    // Without a CELCAT session cookie, the API can't trust an empty result.
+    if (!data.authenticated) return { status: "unknown", authenticated: false };
+    return { status: data.isAvailable ? "available" : "busy", authenticated: true };
   } catch {
-    return "unknown";
+    return { status: "unknown", authenticated: null };
   }
 }
 
@@ -253,6 +261,8 @@ export default function Home() {
   });
   const [availability, setAvailability] = useState<Record<string, Availability>>({});
   const [isChecking, setIsChecking] = useState(false);
+  // null = never queried; false = at least one query came back unauthenticated.
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
 
   // Dynamically compute valid end-time options (must be strictly after start)
   const validEndTimes = startTime
@@ -282,6 +292,7 @@ export default function Home() {
     setAppliedFilters({ dateRange, startTime, endTime, department, roomType });
     setHasSearched(true);
     setAvailability({});
+    setIsAuthenticated(null);
 
     // Only check live availability when the user provided both a date and a
     // time window — otherwise we just show the filtered room list.
@@ -296,14 +307,17 @@ export default function Home() {
     if (matches.length === 0) return;
 
     setIsChecking(true);
-    const date = formatDate(dateRange.from);
-    const entries = await Promise.all(
+    const startDate = formatDate(dateRange.from);
+    const endDate = formatDate(dateRange.to ?? dateRange.from);
+    const results = await Promise.all(
       matches.map(async (room) => {
-        const status = await fetchAvailability(room.id, date, startTime, endTime);
-        return [room.id, status] as const;
+        const r = await fetchAvailability(room.id, startDate, endDate, startTime, endTime);
+        return { id: room.id, ...r };
       })
     );
-    setAvailability(Object.fromEntries(entries));
+    setAvailability(Object.fromEntries(results.map((r) => [r.id, r.status])));
+    const authedFlags = results.map((r) => r.authenticated).filter((a) => a !== null);
+    if (authedFlags.length > 0) setIsAuthenticated(authedFlags.every(Boolean));
     setIsChecking(false);
   };
 
@@ -318,6 +332,7 @@ export default function Home() {
     setAppliedFilters({ dateRange: emptyRange, startTime: "", endTime: "", department: "", roomType: "" });
     setAvailability({});
     setIsChecking(false);
+    setIsAuthenticated(null);
   };
 
   // Rooms only shown after a valid search
@@ -455,6 +470,13 @@ export default function Home() {
         {/* ── Available Rooms ──────────────────────────────── */}
         <section aria-label="Available rooms list">
           <SectionDivider label="Available Rooms" />
+
+          {isAuthenticated === false && (
+            <p className="auth-warning" role="status">
+              No CELCAT session — live availability can&apos;t be checked. Set the
+              <code> CELCAT_COOKIE</code> env var on the server to enable it.
+            </p>
+          )}
 
           <div className="rooms-list" role="list" aria-live="polite">
             {filteredRooms === null ? (
@@ -768,6 +790,21 @@ export default function Home() {
           color: #6b5c4e;
           font-style: italic;
           padding: 0.5rem 0;
+        }
+        .auth-warning {
+          background: #fbecdc;
+          border: 1px solid #e7c8a3;
+          color: #5a3f2e;
+          font-size: 0.85rem;
+          padding: 0.6rem 0.9rem;
+          border-radius: 8px;
+          margin: 0.5rem 0 0.75rem;
+        }
+        .auth-warning code {
+          background: #f3dcc4;
+          padding: 1px 5px;
+          border-radius: 4px;
+          font-size: 0.82rem;
         }
         .result-truncation-note {
           text-align: center;
